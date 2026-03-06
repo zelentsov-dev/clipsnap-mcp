@@ -1,0 +1,79 @@
+name: Bug Report
+description: Clipboard paste not working? Report the issue here.
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill out the details below so we can reproduce and fix the issue.
+  - type: input
+    id: version
+    attributes:
+      label: ClipSnap version
+      description: "Run: npx clipsnap-mcp --version"
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mcp-client
+    attributes:
+      label: MCP Client
+      options:
+        - Claude Code
+        - Cursor
+        - Claude Desktop
+        - Codex CLI
+        - Gemini CLI
+        - Windsurf
+        - Zed
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: terminal
+    attributes:
+      label: Terminal
+      options:
+        - iTerm2
+        - Terminal.app
+        - WezTerm
+        - Kitty
+        - VS Code Terminal
+        - Alacritty
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "macOS 16.1 (Tahoe)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem. Include error messages if any.
+      placeholder: "paste_recent shows 'No recent images found' even though I just took a screenshot..."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1. Take a screenshot with...
+        2. Open Claude Code and type...
+        3. Call paste_recent tool...
+        4. See error...
+    validations:
+      required: true
+  - type: checkboxes
+    id: watcher
+    attributes:
+      label: Watcher status
+      options:
+        - label: Swift clipboard watcher is built and running
+        - label: pngpaste is installed (`brew install pngpaste`)

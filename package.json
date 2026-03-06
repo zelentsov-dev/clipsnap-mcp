@@ -1,7 +1,7 @@
 {
   "name": "clipsnap-mcp",
   "version": "1.0.0",
-  "description": "Reliable clipboard image paste for terminal AI tools. Bypasses iTerm2/terminal clipboard bugs via MCP.",
+  "description": "Fix broken Ctrl+V image paste in iTerm2 and Terminal.app for AI coding tools. MCP server with Swift clipboard watcher that bypasses sandbox-exec, ENOBUFS, and race condition bugs. Works with Claude Code, Codex CLI, Gemini CLI, Cursor.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -14,14 +14,27 @@
   },
   "keywords": [
     "mcp",
+    "mcp-server",
+    "model-context-protocol",
     "clipboard",
     "image",
     "paste",
     "screenshot",
-    "iTerm2",
-    "claude-code"
+    "iterm2",
+    "claude-code",
+    "codex-cli",
+    "gemini-cli",
+    "cursor",
+    "terminal",
+    "macos",
+    "pngpaste",
+    "osascript",
+    "nspasteboard",
+    "clipboard-watcher",
+    "ai-tools",
+    "developer-tools"
   ],
-  "author": "Alexey Zelentsov",
+  "author": "Aleksei Zelentsov",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0"
@@ -40,6 +53,8 @@
   },
   "files": [
     "dist",
+    "watcher/Package.swift",
+    "watcher/Sources",
     ".claude-plugin",
     "commands",
     "hooks",

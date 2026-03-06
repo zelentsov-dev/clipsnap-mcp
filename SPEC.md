@@ -243,7 +243,7 @@ Claude Code получает N изображений → видит все → 
   "version": "1.0.0",
   "description": "Reliable clipboard image paste for terminal AI tools. Bypasses iTerm2/terminal clipboard bugs.",
   "author": {
-    "name": "Alexey Zelentsov"
+    "name": "Aleksei Zelentsov"
   },
   "repository": "https://github.com/<username>/clipsnap-mcp",
   "license": "MIT",
