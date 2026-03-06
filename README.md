@@ -224,7 +224,7 @@ Claude calculates image tokens as `(width x height) / 750`:
 
 ## Compatibility
 
-Built and tested with **Claude Code** on **iTerm2** and **Terminal.app** on macOS.
+Built and tested with **Claude Code** on **iTerm2** on macOS.
 
 Since ClipSnap is a standard MCP server (stdio transport), it should work with any MCP-compatible client — Cursor, Claude Desktop, Windsurf, etc. — but these haven't been tested yet. If you try it, [let us know](https://github.com/zelentsov-dev/clipsnap-mcp/issues).
 
