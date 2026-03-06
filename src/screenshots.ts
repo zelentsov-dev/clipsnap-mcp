@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
+import { extname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -68,9 +69,6 @@ async function findViaSpotlight(count: number): Promise<ScreenshotEntry[]> {
 }
 
 async function findViaFolder(folder: string, count: number): Promise<ScreenshotEntry[]> {
-  const { readdir } = await import('node:fs/promises');
-  const { extname, join } = await import('node:path');
-
   const IMAGE_EXTENSIONS = new Set([
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.tiff', '.heic',
   ]);

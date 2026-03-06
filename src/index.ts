@@ -7,9 +7,8 @@
  *
  * Tools provided:
  * - `paste_image` — reads an image from the macOS clipboard
- * - `paste_recent` — reads the last N images from a screenshots folder
+ * - `paste_recent` — shows recent images from session history or Spotlight
  * - `paste_file` — reads a specific image file by path
- * - `list_images` — lists images saved during the current session
  * - `cleanup_images` — deletes temporary session images
  *
  * Configuration is loaded from environment variables (see {@link loadConfig} in `config.ts`).
@@ -28,7 +27,7 @@ import { homedir, tmpdir } from 'node:os';
 import { loadConfig } from './config.js';
 import { checkClipboardSafety } from './security.js';
 import { readClipboardImage } from './clipboard.js';
-import { processImage, getImageInfo } from './image.js';
+import { processImage } from './image.js';
 import { StorageManager } from './storage.js';
 import { findRecentScreenshots } from './screenshots.js';
 
@@ -204,7 +203,7 @@ server.registerTool(
   {
     title: 'Paste Recent Screenshots',
     description:
-      'Shows the last N images. First checks session history (images previously read via paste_image), then falls back to macOS Spotlight to find screenshots from any app. Pass folder to scan a specific directory instead.',
+      'Shows the last N images. First checks session history (images previously read via paste_image), then falls back to macOS Spotlight to find screenshots from any app. Pass folder to scan a specific directory instead. Tip: if this returns empty, call paste_image first to capture the current clipboard screenshot into session history.',
     inputSchema: {
       count: z
         .number()
@@ -402,55 +401,7 @@ server.registerTool(
   },
 );
 
-// Tool 4: list_images — List saved session images
-server.registerTool(
-  'list_images',
-  {
-    title: 'List Session Images',
-    description: 'Shows images saved during the current ClipSnap session.',
-  },
-  async (): Promise<CallToolResult> => {
-    const files = await storage.listImages();
-
-    if (files.length === 0) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: 'No images saved in current session.',
-          },
-        ],
-      };
-    }
-
-    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-    const lines: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      let dims = '';
-      try {
-        const info = await getImageInfo(f.path);
-        dims = `${info.width}x${info.height}, `;
-      } catch {
-        // skip dimensions if sips fails
-      }
-      lines.push(
-        `${i + 1}. ${f.name} (${dims}${formatBytes(f.size)}) — ${timeAgo(f.mtime)}`,
-      );
-    }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `ClipSnap session images (${files.length} files, ${formatBytes(totalSize)}):\n${lines.join('\n')}`,
-        },
-      ],
-    };
-  },
-);
-
-// Tool 5: cleanup_images — Manual cleanup
+// Tool 4: cleanup_images — Manual cleanup
 server.registerTool(
   'cleanup_images',
   {
