@@ -54,11 +54,6 @@
   "files": [
     "dist",
     "watcher/Package.swift",
-    "watcher/Sources",
-    ".claude-plugin",
-    "commands",
-    "hooks",
-    "scripts",
-    ".mcp.json"
+    "watcher/Sources"
   ]
 }
