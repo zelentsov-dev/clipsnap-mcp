@@ -30,6 +30,7 @@ import { checkClipboardSafety } from './security.js';
 import { readClipboardImage } from './clipboard.js';
 import { processImage, getImageInfo } from './image.js';
 import { StorageManager } from './storage.js';
+import { findRecentScreenshots } from './screenshots.js';
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -65,6 +66,55 @@ function timeAgo(date: Date): string {
   return `${hours}h ago`;
 }
 
+/** Processes image data and builds a standard MCP image response. */
+async function buildImageResponse(
+  data: Buffer,
+  source: string,
+  opts: { format: 'png' | 'jpeg'; quality: number; maxDimension: number; shouldSave: boolean },
+): Promise<CallToolResult> {
+  const processed = await processImage(data, {
+    maxDimension: opts.maxDimension,
+    format: opts.format,
+    quality: opts.quality,
+  });
+
+  let savedPath = '';
+  if (opts.shouldSave) {
+    savedPath = await storage.saveImage(processed.data, opts.format);
+  }
+
+  const resized =
+    processed.originalWidth !== processed.width ||
+    processed.originalHeight !== processed.height;
+  const sizeInfo = formatBytes(processed.data.length);
+  const content: CallToolResult['content'] = [];
+
+  if (processed.originalWidth > 4000 || processed.originalHeight > 4000) {
+    content.push({
+      type: 'text',
+      text: `Image is very large (${processed.originalWidth}x${processed.originalHeight}). Resizing to ${processed.width}x${processed.height} for optimal processing.`,
+    });
+  }
+
+  content.push({
+    type: 'image',
+    data: processed.data.toString('base64'),
+    mimeType: processed.mimeType,
+  });
+
+  let description = `${source} (${processed.originalWidth}x${processed.originalHeight}`;
+  if (resized) {
+    description += ` → resized to ${processed.width}x${processed.height}`;
+  }
+  description += `, ${sizeInfo})`;
+  if (savedPath) {
+    description += `. Saved: ${savedPath}`;
+  }
+  content.push({ type: 'text', text: description });
+
+  return { content };
+}
+
 const server = new McpServer({
   name: 'clipsnap',
   version: '1.0.0',
@@ -94,7 +144,13 @@ server.registerTool(
     },
   },
   async (args): Promise<CallToolResult> => {
-    // Security check
+    const format = args.format ?? config.imageFormat;
+    const quality = args.quality ?? config.jpegQuality;
+    const maxDimension = args.max_dimension ?? config.maxDimension;
+    const shouldSave = args.save ?? true;
+
+    // --- Try clipboard first ---
+    let clipboardBlocked = false;
     if (config.checkConcealed) {
       const safety = await checkClipboardSafety();
       if (!safety.safe) {
@@ -103,104 +159,42 @@ server.registerTool(
           isError: true,
         };
       }
-      if (!safety.hasImage) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: 'No image found in clipboard. Copy a screenshot first (Cmd+Shift+4, Shottr, or Cmd+C on an image).',
-            },
-          ],
-          isError: true,
-        };
-      }
+      clipboardBlocked = !safety.hasImage;
     }
 
-    try {
-      const clipboard = await readClipboardImage();
-
-      const format = args.format ?? config.imageFormat;
-      const quality = args.quality ?? config.jpegQuality;
-      const maxDimension = args.max_dimension ?? config.maxDimension;
-      const shouldSave = args.save ?? true;
-
-      const processed = await processImage(clipboard.data, {
-        maxDimension,
-        format,
-        quality,
-      });
-
-      let savedPath = '';
-      if (shouldSave) {
-        savedPath = await storage.saveImage(processed.data, format);
-      }
-
-      const resized =
-        processed.originalWidth !== processed.width ||
-        processed.originalHeight !== processed.height;
-      const sizeInfo = formatBytes(processed.data.length);
-
-      const content: CallToolResult['content'] = [];
-
-      // Warn if image was very large
-      if (
-        processed.originalWidth > 4000 ||
-        processed.originalHeight > 4000
-      ) {
-        content.push({
-          type: 'text',
-          text: `Image is very large (${processed.originalWidth}x${processed.originalHeight}). Resizing to ${processed.width}x${processed.height} for optimal processing.`,
+    if (!clipboardBlocked) {
+      try {
+        const clipboard = await readClipboardImage();
+        return await buildImageResponse(clipboard.data, 'Image from clipboard', {
+          format, quality, maxDimension, shouldSave,
         });
+      } catch {
+        // Clipboard read failed — fall through to screenshot fallback
       }
-
-      content.push({
-        type: 'image',
-        data: processed.data.toString('base64'),
-        mimeType: processed.mimeType,
-      });
-
-      let description = `Image from clipboard (${processed.originalWidth}x${processed.originalHeight}`;
-      if (resized) {
-        description += ` → resized to ${processed.width}x${processed.height}`;
-      }
-      description += `, ${sizeInfo})`;
-      if (savedPath) {
-        description += `. Saved: ${savedPath}`;
-      }
-      content.push({ type: 'text', text: description });
-
-      return { content };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      // Detect macOS 16+ clipboard permission denial
-      if (msg.includes('not permitted') || msg.includes('denied')) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: 'Clipboard access denied by macOS. When prompted, click "Allow" to grant clipboard access to Terminal.',
-            },
-          ],
-          isError: true,
-        };
-      }
-      // Detect disk full
-      if (msg.includes('ENOSPC') || msg.includes('No space left')) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: 'Cannot save image: disk space low. Run cleanup_images or free disk space.',
-            },
-          ],
-          isError: true,
-        };
-      }
-      return {
-        content: [{ type: 'text', text: msg }],
-        isError: true,
-      };
     }
+
+    // --- Fallback: latest screenshot via Spotlight (any app) ---
+    const recent = await findRecentScreenshots(1, config.screenshotsDir);
+    if (recent.length > 0) {
+      try {
+        const raw = await readFile(recent[0].path);
+        return await buildImageResponse(raw, `Latest screenshot: ${recent[0].name}`, {
+          format, quality, maxDimension, shouldSave,
+        });
+      } catch {
+        // Fall through to error
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `No image in clipboard and no screenshots found. Copy a screenshot first (Cmd+Shift+4, Shottr, or Cmd+C on an image).`,
+        },
+      ],
+      isError: true,
+    };
   },
 );
 
@@ -210,7 +204,7 @@ server.registerTool(
   {
     title: 'Paste Recent Screenshots',
     description:
-      'Reads the last N images from a folder (default: ~/Screenshots).',
+      'Reads the last N screenshots. Uses macOS Spotlight to find screenshots from any app (native, Shottr, CleanShot X, etc). Pass folder to scan a specific directory instead.',
     inputSchema: {
       count: z
         .number()
@@ -228,69 +222,38 @@ server.registerTool(
   },
   async (args): Promise<CallToolResult> => {
     const count = args.count ?? 3;
-    const folder = resolvePath(args.folder ?? config.screenshotsDir);
     const maxDimension = args.max_dimension ?? config.maxDimension;
+    const explicitFolder = args.folder ? resolvePath(args.folder) : undefined;
 
-    let entries: string[];
-    try {
-      entries = await readdir(folder);
-    } catch {
+    // Use Spotlight discovery when no folder specified, folder scan otherwise
+    const selected = explicitFolder
+      ? await findRecentScreenshots(count, explicitFolder)
+      : await findRecentScreenshots(count, config.screenshotsDir);
+
+    if (selected.length === 0) {
+      const hint = explicitFolder
+        ? `No image files found in ${explicitFolder}.`
+        : 'No screenshots found. Take some screenshots first (Cmd+Shift+4, Shottr, CleanShot X, etc).';
       return {
-        content: [
-          {
-            type: 'text',
-            text: `Folder not found: ${folder}. Set CLIPSNAP_SCREENSHOTS_DIR to your screenshots folder.`,
-          },
-        ],
+        content: [{ type: 'text', text: hint }],
         isError: true,
       };
     }
 
-    // Filter image files and get stats
-    const imageFiles: { name: string; path: string; mtime: Date }[] = [];
-    for (const name of entries) {
-      const ext = extname(name).toLowerCase();
-      if (!IMAGE_EXTENSIONS.has(ext)) continue;
-      const filePath = join(folder, name);
-      try {
-        const info = await stat(filePath);
-        if (info.isFile()) {
-          imageFiles.push({ name, path: filePath, mtime: info.mtime });
-        }
-      } catch {
-        // skip inaccessible files
-      }
-    }
-
-    if (imageFiles.length === 0) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `No image files found in ${folder}. Take some screenshots first.`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // Sort by mtime descending, take last N
-    imageFiles.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-    const selected = imageFiles.slice(0, count);
-
+    const source = explicitFolder ?? 'system (Spotlight)';
     const content: CallToolResult['content'] = [
       {
         type: 'text',
-        text: `${selected.length} recent images from ${folder}:`,
+        text: `${selected.length} recent screenshots from ${source}:`,
       },
     ];
 
     for (let i = 0; i < selected.length; i++) {
-      const file = selected[i];
+      const entry = selected[i];
       try {
-        const raw = await readFile(file.path);
-        const format = extname(file.name).toLowerCase() === '.jpg' ||
-          extname(file.name).toLowerCase() === '.jpeg'
+        const raw = await readFile(entry.path);
+        const format = extname(entry.name).toLowerCase() === '.jpg' ||
+          extname(entry.name).toLowerCase() === '.jpeg'
           ? 'jpeg' as const
           : 'png' as const;
 
@@ -307,12 +270,12 @@ server.registerTool(
         });
         content.push({
           type: 'text',
-          text: `${i + 1}. ${file.name} (${processed.width}x${processed.height})`,
+          text: `${i + 1}. ${entry.name} (${processed.width}x${processed.height})`,
         });
       } catch (error) {
         content.push({
           type: 'text',
-          text: `${i + 1}. ${file.name} — error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `${i + 1}. ${entry.name} — error: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
     }

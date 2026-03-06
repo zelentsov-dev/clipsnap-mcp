@@ -10,7 +10,6 @@
         "CLIPSNAP_MAX_DIMENSION": "1568",
         "CLIPSNAP_IMAGE_FORMAT": "png",
         "CLIPSNAP_JPEG_QUALITY": "80",
-        "CLIPSNAP_SCREENSHOTS_DIR": "~/Screenshots",
         "CLIPSNAP_CHECK_CONCEALED": "true",
         "CLIPSNAP_CLEANUP_ON_EXIT": "true"
       }

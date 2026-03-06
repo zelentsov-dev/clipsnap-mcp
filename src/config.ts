@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 
 /**
  * Application configuration controlling image processing, storage limits, and security behavior.
@@ -74,18 +76,40 @@ function resolvePath(raw: string): string {
 }
 
 /**
+ * Auto-detects the macOS screenshot folder.
+ *
+ * Resolution order:
+ * 1. `defaults read com.apple.screencapture location` (user's macOS setting)
+ * 2. `~/Screenshots` (if exists)
+ * 3. `~/Desktop` (macOS default)
+ */
+function detectScreenshotsDir(): string {
+  try {
+    const raw = execFileSync('defaults', ['read', 'com.apple.screencapture', 'location'], {
+      encoding: 'utf-8',
+      timeout: 3_000,
+    }).trim();
+    if (raw) return resolvePath(raw);
+  } catch {
+    // defaults key not set — fall through
+  }
+
+  const home = homedir();
+  const candidates = [
+    join(home, 'Screenshots'),
+    join(home, 'Desktop'),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(dir)) return dir;
+  }
+  return candidates[0];
+}
+
+/**
  * Loads the application configuration from environment variables with sensible defaults.
  *
- * Environment variables:
- * - `CLIPSNAP_MAX_FILES` — max stored files (default: 50)
- * - `CLIPSNAP_TTL_MINUTES` — file TTL in minutes (default: 60)
- * - `CLIPSNAP_MAX_SIZE_MB` — max total storage in MB (default: 200)
- * - `CLIPSNAP_MAX_DIMENSION` — max image dimension in px (default: 1568)
- * - `CLIPSNAP_IMAGE_FORMAT` — `"png"` or `"jpeg"` (default: `"png"`)
- * - `CLIPSNAP_JPEG_QUALITY` — JPEG quality 1-100 (default: 80)
- * - `CLIPSNAP_SCREENSHOTS_DIR` — screenshots folder (default: `~/Screenshots`)
- * - `CLIPSNAP_CHECK_CONCEALED` — check for password managers (default: `true`)
- * - `CLIPSNAP_CLEANUP_ON_EXIT` — auto-delete on exit (default: `true`)
+ * The screenshots directory is auto-detected from macOS settings unless overridden
+ * via `CLIPSNAP_SCREENSHOTS_DIR`.
  *
  * @returns A fully resolved {@link Config} object
  */
@@ -100,9 +124,9 @@ export function loadConfig(): Config {
     maxDimension: envInt('CLIPSNAP_MAX_DIMENSION', 1568),
     imageFormat: format === 'jpeg' ? 'jpeg' : 'png',
     jpegQuality: Math.max(1, Math.min(100, quality)),
-    screenshotsDir: resolvePath(
-      process.env['CLIPSNAP_SCREENSHOTS_DIR'] ?? '~/Screenshots',
-    ),
+    screenshotsDir: process.env['CLIPSNAP_SCREENSHOTS_DIR']
+      ? resolvePath(process.env['CLIPSNAP_SCREENSHOTS_DIR'])
+      : detectScreenshotsDir(),
     checkConcealed: envBool('CLIPSNAP_CHECK_CONCEALED', true),
     cleanupOnExit: envBool('CLIPSNAP_CLEANUP_ON_EXIT', true),
   };

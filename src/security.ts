@@ -16,8 +16,8 @@ export interface ClipboardSafetyResult {
   hasImage: boolean;
 }
 
-/** macOS UTI types that indicate image content on the clipboard. */
-const IMAGE_TYPES = ['public.png', 'public.tiff', 'public.jpeg'] as const;
+/** Strings that appear in `osascript -e 'clipboard info'` output when image data is present. */
+const IMAGE_MARKERS = ['PNGf', 'TIFF', 'JPEG', 'GIF picture', 'public.png', 'public.tiff', 'public.jpeg'] as const;
 
 /**
  * Inspects the macOS clipboard metadata via `osascript` to detect unsafe content
@@ -63,7 +63,7 @@ export async function checkClipboardSafety(): Promise<ClipboardSafetyResult> {
     };
   }
 
-  const hasImage = IMAGE_TYPES.some((type) => stdout.includes(type));
+  const hasImage = IMAGE_MARKERS.some((marker) => stdout.includes(marker));
 
   return { safe: true, hasImage };
 }
