@@ -2,7 +2,7 @@
   "mcpServers": {
     "clipsnap": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+      "args": ["dist/index.js"],
       "env": {
         "CLIPSNAP_MAX_FILES": "50",
         "CLIPSNAP_TTL_MINUTES": "60",

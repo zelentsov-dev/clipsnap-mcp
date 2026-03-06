@@ -87,29 +87,38 @@ Auto-resize to optimal AI vision dimensions (1568px). Saves tokens without losin
 
 ## Quick Start
 
-Clone and build:
+### Install
 
 ```bash
 git clone https://github.com/zelentsov-dev/clipsnap-mcp.git
 cd clipsnap-mcp
 npm install
-npm run build    # TypeScript + Swift clipboard watcher
+npm run build        # TypeScript + Swift clipboard watcher
+npm install -g .     # install globally
 ```
 
-Then add to your Claude Code MCP config (`~/.claude.json` or project `.mcp.json`):
+> **Note:** `npm install -g git+https://...` does not work because the package requires a build step. You must clone, build, then install.
 
-```json
-{
-  "mcpServers": {
-    "clipsnap": {
-      "command": "node",
-      "args": ["/path/to/clipsnap-mcp/dist/index.js"]
-    }
-  }
-}
+### Add to Claude Code
+
+```bash
+claude mcp add --scope user --transport stdio clipsnap -- clipsnap-mcp
 ```
 
-That's it. Now when you say *"look at my screenshot"* or *"check what I just captured"*, Claude Code will use ClipSnap to find your images.
+This registers ClipSnap globally across all your projects. Verify with:
+
+```bash
+claude mcp list
+```
+
+Then restart Claude Code. Now when you say *"look at my screenshot"* or *"check what I just captured"*, Claude Code will use ClipSnap to find your images.
+
+### Uninstall
+
+```bash
+claude mcp remove clipsnap --scope user
+npm uninstall -g clipsnap-mcp
+```
 
 ---
 
