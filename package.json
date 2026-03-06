@@ -8,7 +8,7 @@
     "clipsnap-mcp": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cd watcher && swift build -c release 2>&1 || true",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm run build"
   },

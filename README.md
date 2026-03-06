@@ -1,13 +1,13 @@
 # ClipSnap
 
-**Reliable clipboard image paste for terminal AI tools.**
+**Reliable screenshot and clipboard image paste for terminal AI tools.**
 
 [![npm version](https://img.shields.io/npm/v/clipsnap-mcp)](https://www.npmjs.com/package/clipsnap-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](https://github.com/zelentsov-dev/clipsnap-mcp)
 
-An [MCP](https://modelcontextprotocol.io/) server that gives AI coding assistants reliable access to clipboard images and screenshot files. Works with Claude Code, Codex CLI, Gemini CLI, Cursor, and any MCP-compatible client.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI coding assistants reliable access to clipboard images and screenshot files. A background Swift daemon watches the clipboard in real time, so screenshots from any app -- including clipboard-only tools like Shottr -- are captured automatically and available instantly. Works with Claude Code, Codex CLI, Gemini CLI, Cursor, and any MCP-compatible client.
 
 ---
 
@@ -25,13 +25,20 @@ These issues affect Claude Code, [Codex CLI](https://github.com/openai/codex/iss
 
 ## The Solution
 
-ClipSnap runs as a separate Node.js process **outside the terminal sandbox**, using the MCP protocol to deliver images directly to AI tools as base64-encoded content.
+ClipSnap takes a two-pronged approach:
+
+1. **Clipboard watcher** -- a lightweight Swift daemon polls `NSPasteboard` every 500ms and saves new images to `~/.clipsnap/clipboard-captures/` as PNG files. This captures clipboard-only screenshots (e.g., Shottr with Esc, or Cmd+C on an image) that would otherwise be lost.
+2. **Multi-source discovery** -- when you ask for a screenshot, ClipSnap searches three sources in parallel: watcher captures, native macOS screenshots directory, and Spotlight (`mdfind`). The newest image wins.
+
+Both components run as a single MCP server **outside the terminal sandbox**, delivering images to AI tools as base64-encoded content.
 
 - Bypasses `sandbox-exec` (MCP servers run outside the sandbox)
-- Uses `pngpaste` (fast, reliable) with `osascript` fallback (zero-install)
+- Clipboard images captured automatically in real time (~500ms latency)
+- Parallel multi-source search: watcher + native dir + Spotlight
 - Resizes images to optimal dimensions for AI vision models (saves tokens)
 - Auto-cleans temp files with configurable TTL, count, and size limits
 - Detects passwords and sensitive clipboard data before reading
+- Graceful degradation if Swift watcher binary is not built
 
 ---
 
@@ -66,74 +73,68 @@ This auto-configures the MCP server, slash commands (`/clipsnap:paste`, `/clipsn
 brew install pngpaste
 ```
 
-`pngpaste` is the primary clipboard reader -- fast and reliable. Without it, ClipSnap falls back to `osascript` (slower, built-in).
+`pngpaste` is used as a legacy clipboard fallback. Without it, ClipSnap falls back to `osascript` (slower, built-in). The primary clipboard capture path uses the Swift watcher daemon, which does not require `pngpaste`.
 
 ---
 
-## Features
+## Architecture
 
-- **5 MCP tools** -- paste from clipboard, read recent screenshots, open specific files, list session images, cleanup temp files
-- **Smart resizing** -- auto-downscale to 1568px (Claude's optimal limit) using `sips` (built-in macOS, no native dependencies)
-- **Security-first** -- detects `ConcealedType` (passwords from 1Password, Bitwarden) and `TransientType` markers before reading
-- **Multi-session safe** -- each MCP process gets an isolated temp directory with UUID-based naming
-- **Defense-in-depth cleanup** -- TTL, file count, total size limits, SIGINT/SIGTERM handler, plus macOS `$TMPDIR` auto-cleanup
-- **Zero heavy dependencies** -- only `@modelcontextprotocol/sdk` and `zod`. Image processing uses `sips` (built-in macOS)
-- **Claude Code plugin** -- slash commands and optional auto-detect hook for seamless UX
-- **macOS 16 ready** -- graceful handling of upcoming clipboard privacy prompts
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  MCP Server (Node.js)                                           │
+│                                                                  │
+│  Startup: spawns Swift watcher daemon                            │
+│  Shutdown: sends SIGTERM to watcher                              │
+│                                                                  │
+│  Tools:                                                          │
+│    paste_recent  — returns N most recent screenshots             │
+│    cleanup_images — deletes temp/session images                  │
+│                                                                  │
+│  Screenshot Discovery (parallel, via Promise.allSettled):        │
+│    1. ~/.clipsnap/clipboard-captures/  (watcher, instant)        │
+│    2. Native macOS screenshots dir     (direct scan, instant)    │
+│    3. Spotlight mdfind                 (broad, may have delay)   │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ spawns
+┌──────────────────────────▼──────────────────────────────────────┐
+│  Clipboard Watcher (Swift, background daemon)                    │
+│                                                                  │
+│  Polls NSPasteboard every 500ms                                  │
+│  Saves new clipboard images as PNG to ~/.clipsnap/               │
+│  Auto-prunes to max 50 files                                     │
+│  JSON structured logging to stderr                               │
+│  Clean shutdown on SIGTERM/SIGINT via Atomic<Bool>               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Swift clipboard watcher** | NSPasteboard polling is cheap and reliable; captures clipboard-only screenshots that never hit disk |
+| **Watcher is optional** | Graceful degradation -- if the binary is not built, Spotlight + native dir still work |
+| **Parallel multi-source** | `Promise.allSettled` on watcher dir + native dir + Spotlight; fastest source wins |
+| **stdio transport** | Standard for local CLI tools; universal MCP client support |
+| **`sips` for resize** | Built-in macOS, zero native dependencies |
+| **UUID session dirs** | Isolates temp files between multiple Claude Code tabs |
+| **Max 50 watcher files** | Auto-prunes oldest captures to bound disk usage |
+| **JSON structured logging** | Watcher emits JSON lines to stderr for debuggability |
 
 ---
 
 ## Tools Reference
 
-### `paste_image`
-
-Reads an image from the system clipboard and returns it as MCP image content.
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `format` | `"png" \| "jpeg"` | No | `png` | Output format |
-| `quality` | `number (1-100)` | No | `80` | JPEG quality (ignored for PNG) |
-| `max_dimension` | `number` | No | `1568` | Max long edge in pixels |
-| `save` | `boolean` | No | `true` | Save a copy to the temp directory |
-
-**Example prompt:** "Look at this screenshot" or `/clipsnap:paste`
-
----
-
 ### `paste_recent`
 
-Reads the last N images from a folder (default: `~/Screenshots`).
+Returns the most recent N screenshot images. Combines three sources: clipboard watcher captures, native macOS screenshots directory, and Spotlight. Results are sorted by time, newest first. This is the primary tool.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `count` | `number (1-10)` | No | `3` | Number of images to return |
-| `folder` | `string` | No | `~/Screenshots` | Source folder path |
+| `folder` | `string` | No | -- | Scan a specific folder instead of the default multi-source search |
 | `max_dimension` | `number` | No | `1568` | Max long edge in pixels |
 
-**Example prompt:** "Compare the last 4 screenshots" or `/clipsnap:paste-recent`
-
----
-
-### `paste_file`
-
-Reads a specific image file by path.
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `path` | `string` | **Yes** | -- | Absolute or `~`-prefixed path to image |
-| `max_dimension` | `number` | No | `1568` | Max long edge in pixels |
-
-**Supported formats:** PNG, JPEG, GIF, WebP, TIFF, HEIC
-
-**Example prompt:** "Analyze ~/Desktop/mockup.png"
-
----
-
-### `list_images`
-
-Shows images saved during the current ClipSnap session. Takes no parameters.
-
-Returns a text listing with filenames, dimensions, sizes, and timestamps.
+**Example prompts:** "Look at my screenshot", "Compare the last 4 screenshots", `/clipsnap:paste`
 
 ---
 
@@ -145,6 +146,32 @@ Deletes temporary ClipSnap images.
 |-----------|------|----------|---------|-------------|
 | `all` | `boolean` | No | `false` | Delete ALL sessions (not just current) |
 | `older_than_minutes` | `number` | No | `0` | Delete files older than N minutes |
+
+---
+
+## How It Works
+
+```
+1. Claude Code starts
+   └─► MCP server starts
+       └─► Swift clipboard watcher spawns as background daemon
+
+2. User takes screenshot (any app: native, Shottr, CleanShot X, browser Cmd+C, etc.)
+   └─► Clipboard gets image
+       └─► Watcher detects NSPasteboard change within ~500ms
+           └─► Saves PNG to ~/.clipsnap/clipboard-captures/clip-<ts>-<uuid>.png
+
+3. User: "look at my screenshot"
+   └─► MCP client calls `paste_recent` tool
+       └─► Parallel search:
+           ├── Watcher captures dir (clipboard images, instant)
+           ├── Native macOS screenshots dir (file-saved screenshots)
+           └── Spotlight mdfind (broad coverage, all apps)
+       └─► Merge, dedup, sort by time → return newest N as base64 images
+
+4. Claude Code exits
+   └─► SIGTERM → watcher receives signal → Atomic<Bool> flips → clean shutdown
+```
 
 ---
 
@@ -160,7 +187,7 @@ All settings are configured via environment variables in your MCP server config:
 | `CLIPSNAP_MAX_DIMENSION` | number | `1568` | Max image long edge (px). Values above 1568 waste tokens without quality gain |
 | `CLIPSNAP_IMAGE_FORMAT` | `png \| jpeg` | `png` | Output format. JPEG saves ~5x disk but is lossy |
 | `CLIPSNAP_JPEG_QUALITY` | number (1-100) | `80` | JPEG quality. 80 is good for code screenshots |
-| `CLIPSNAP_SCREENSHOTS_DIR` | path | `~/Screenshots` | Default folder for `paste_recent` |
+| `CLIPSNAP_SCREENSHOTS_DIR` | path | auto-detected | Native screenshots folder. Auto-detected from `defaults read com.apple.screencapture location`, falls back to `~/Screenshots` or `~/Desktop` |
 | `CLIPSNAP_CHECK_CONCEALED` | boolean | `true` | Check ConcealedType/TransientType before reading |
 | `CLIPSNAP_CLEANUP_ON_EXIT` | boolean | `true` | Delete session files on SIGINT/SIGTERM |
 
@@ -180,7 +207,6 @@ All settings are configured via environment variables in your MCP server config:
         "CLIPSNAP_MAX_DIMENSION": "1568",
         "CLIPSNAP_IMAGE_FORMAT": "png",
         "CLIPSNAP_JPEG_QUALITY": "80",
-        "CLIPSNAP_SCREENSHOTS_DIR": "~/Screenshots",
         "CLIPSNAP_CHECK_CONCEALED": "true",
         "CLIPSNAP_CLEANUP_ON_EXIT": "true"
       }
@@ -203,40 +229,28 @@ Claude calculates image tokens as `(width x height) / 750`:
 
 ---
 
-## How It Works
+## Building
 
-```
-User: "look at this screenshot"
-  |
-  v
-MCP Client (Claude Code / Cursor / Codex CLI / ...)
-  |
-  v
-ClipSnap MCP Server (separate Node.js process, OUTSIDE terminal sandbox)
-  |
-  |-- 1. Security check: ConcealedType / TransientType markers
-  |-- 2. Read clipboard: pngpaste -> osascript fallback
-  |-- 3. Save to $TMPDIR/clipsnap-<session-uuid>/img-<ts>-<rand>.png
-  |-- 4. Resize if needed (max 1568px via sips)
-  |-- 5. Encode to base64
-  |-- 6. Cleanup old files (TTL / count / size limits)
-  |
-  v
-MCP Response: { type: "image", data: "<base64>", mimeType: "image/png" }
-  |
-  v
-AI sees the image and responds
+### Prerequisites
+
+- **Node.js** 20+
+- **Swift** 6.2+ / Xcode 26+ (for the clipboard watcher)
+- **macOS** 15+ (Sequoia or later)
+
+### Build
+
+```bash
+npm install
+npm run build    # builds TypeScript (tsc) + Swift watcher (swift build -c release)
 ```
 
-### Key Design Decisions
+The build script compiles both the TypeScript MCP server and the Swift clipboard watcher. If Swift is not available, the watcher build is skipped gracefully -- the server will still work using Spotlight and native directory scanning.
 
-| Decision | Rationale |
-|----------|-----------|
-| **stdio transport** | Standard for local CLI tools; universal MCP client support |
-| **`pngpaste` primary** | Fast, reliable, no AppleScript overhead |
-| **`sips` for resize** | Built-in macOS, zero native dependencies |
-| **UUID session dirs** | Isolates files between multiple Claude Code tabs |
-| **`0600` file permissions** | Owner read/write only on temp images |
+### Development
+
+```bash
+npm run dev      # runs the server with tsx for hot-reload
+```
 
 ---
 
@@ -246,13 +260,13 @@ ClipSnap is designed with a security-first approach:
 
 - **Password detection** -- checks for `org.nspasteboard.ConcealedType` before reading clipboard (passwords from 1Password, Bitwarden, macOS Keychain). Refuses to read and warns the user
 - **Transient data detection** -- checks for `org.nspasteboard.TransientType` (temporary clipboard data that may have expired)
-- **File permissions** -- temp files created with mode `0600` (owner read/write only)
+- **File permissions** -- temp files created with mode `0600` (owner read/write only), watcher directory with `0700`
 - **Session isolation** -- UUID-based subdirectories per MCP process (`$TMPDIR/clipsnap-<uuid>/`)
 - **Unpredictable paths** -- timestamp + random suffix prevents path guessing
 - **No logging of content** -- clipboard data is never logged, not even in debug mode
 - **No memory caching** -- image data is not retained beyond the current request
 - **No network calls** -- no telemetry, no external services, fully offline
-- **Graceful cleanup** -- SIGINT/SIGTERM handler deletes session directory
+- **Graceful cleanup** -- SIGINT/SIGTERM handler deletes session directory and stops the watcher
 
 ---
 
@@ -283,9 +297,10 @@ ClipSnap is designed with a security-first approach:
 
 ### System Requirements
 
-- **macOS** 12+ (Monterey or later)
+- **macOS** 15+ (Sequoia or later)
 - **Node.js** 20+
-- **pngpaste** (recommended): `brew install pngpaste`
+- **Swift** 6.2+ (for building the clipboard watcher; optional at runtime)
+- **pngpaste** (optional): `brew install pngpaste` -- legacy clipboard fallback
 - **sips** (built-in macOS) -- used for image resize/convert
 
 > **Note:** Linux and Windows support is planned for a future release.
@@ -293,6 +308,21 @@ ClipSnap is designed with a security-first approach:
 ---
 
 ## Troubleshooting
+
+<details>
+<summary><strong>Watcher not capturing clipboard images</strong></summary>
+
+The Swift watcher binary must be built first:
+
+```bash
+cd watcher && swift build -c release
+```
+
+Or run `npm run build` which builds both TypeScript and Swift. If the binary is missing, ClipSnap still works -- it just uses Spotlight and native directory scanning instead of real-time clipboard capture.
+
+Check watcher logs (JSON lines on stderr) for errors.
+
+</details>
 
 <details>
 <summary><strong>pngpaste not found</strong></summary>
@@ -303,19 +333,19 @@ Install via Homebrew:
 brew install pngpaste
 ```
 
-ClipSnap works without it (falls back to `osascript`), but `pngpaste` is faster and more reliable.
+This is only needed as a legacy clipboard fallback. The primary clipboard capture path uses the Swift watcher daemon, which does not need `pngpaste`.
 
 </details>
 
 <details>
-<summary><strong>"No image found in clipboard"</strong></summary>
+<summary><strong>"No recent images found"</strong></summary>
 
-Make sure you have an image copied to the clipboard:
+Make sure you have taken a screenshot or copied an image:
 - Take a screenshot: `Cmd+Shift+4` (region) or `Cmd+Shift+3` (full screen)
 - Copy from an app: `Cmd+C` on an image in Preview, Figma, browser, etc.
 - Use a screenshot tool like Shottr or CleanShot X
 
-Text-only clipboard content is not supported by `paste_image`. Use `paste_file` to read image files directly.
+If the watcher is running, clipboard images are captured automatically. Otherwise, only file-saved screenshots (native dir + Spotlight) are discovered.
 
 </details>
 
@@ -346,9 +376,9 @@ On macOS 16 (Tahoe) and later, you may also see a clipboard privacy prompt -- cl
 </details>
 
 <details>
-<summary><strong>Folder not found: ~/Screenshots</strong></summary>
+<summary><strong>Screenshots directory not found</strong></summary>
 
-The default screenshots folder is `~/Screenshots`. If your screenshots are saved elsewhere, set the environment variable:
+ClipSnap auto-detects your macOS screenshot directory from `defaults read com.apple.screencapture location`, falling back to `~/Screenshots` or `~/Desktop`. To override:
 
 ```json
 { "env": { "CLIPSNAP_SCREENSHOTS_DIR": "~/Desktop" } }
@@ -376,7 +406,7 @@ Or for JPEG with higher quality:
 <details>
 <summary><strong>Disk space growing</strong></summary>
 
-ClipSnap auto-cleans temp files, but you can also trigger manual cleanup:
+ClipSnap auto-cleans temp files and the watcher auto-prunes to 50 captures. You can also trigger manual cleanup:
 
 - Ask your AI: "Clean up clipsnap images"
 - Or adjust limits: `CLIPSNAP_MAX_FILES`, `CLIPSNAP_TTL_MINUTES`, `CLIPSNAP_MAX_SIZE_MB`
@@ -395,10 +425,11 @@ Contributions are welcome! Here is how to get started:
 git clone https://github.com/zelentsov-dev/clipsnap-mcp.git
 cd clipsnap-mcp
 npm install
-npm run dev
+npm run build    # TypeScript + Swift watcher
+npm run dev      # dev server with hot-reload
 ```
 
-The dev server runs with `tsx` for hot-reload. To test manually, configure your MCP client to point to the local build:
+To test manually, configure your MCP client to point to the local build:
 
 ```json
 {

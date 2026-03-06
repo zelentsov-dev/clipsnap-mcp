@@ -1,9 +1,17 @@
 import { execFile } from 'node:child_process';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, lstat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { extname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+const IMAGE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.tiff', '.heic',
+]);
+
+/** Well-known directory where the clipboard watcher saves captured images. */
+const WATCHER_DIR = join(homedir(), '.clipsnap', 'clipboard-captures');
 
 export interface ScreenshotEntry {
   path: string;
@@ -12,25 +20,62 @@ export interface ScreenshotEntry {
 }
 
 /**
- * Finds recent screenshots system-wide using macOS Spotlight (`mdfind`).
- * Falls back to scanning a specific folder if Spotlight fails.
+ * Finds recent screenshots from multiple sources in parallel:
+ * 1. Watcher captures dir — clipboard images saved by the Swift watcher (instant)
+ * 2. Native macOS screenshots dir (instant)
+ * 3. Spotlight `mdfind` — broad coverage for all apps/locations (may have indexing delay)
  *
- * @param count - Maximum number of screenshots to return
- * @param fallbackDir - Directory to scan if mdfind fails
- * @returns Array of screenshot entries sorted by mtime descending
+ * Results are merged, deduplicated by path, and sorted by mtime desc.
  */
 export async function findRecentScreenshots(
   count: number,
-  fallbackDir?: string,
+  nativeDir?: string,
 ): Promise<ScreenshotEntry[]> {
-  try {
-    return await findViaSpotlight(count);
-  } catch {
-    if (fallbackDir) {
-      return findViaFolder(fallbackDir, count);
+  const dirsToScan = [WATCHER_DIR];
+  if (nativeDir) dirsToScan.push(nativeDir);
+
+  const [directResult, spotlightResult] = await Promise.allSettled([
+    scanDirs(dirsToScan, count * 2),
+    findViaSpotlight(count * 2),
+  ]);
+
+  const seen = new Set<string>();
+  const merged: ScreenshotEntry[] = [];
+
+  for (const entry of directResult.status === 'fulfilled' ? directResult.value : []) {
+    if (!seen.has(entry.path)) {
+      seen.add(entry.path);
+      merged.push(entry);
     }
-    return [];
   }
+  for (const entry of spotlightResult.status === 'fulfilled' ? spotlightResult.value : []) {
+    if (!seen.has(entry.path)) {
+      seen.add(entry.path);
+      merged.push(entry);
+    }
+  }
+
+  merged.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  return merged.slice(0, count);
+}
+
+/** Scans multiple directories for image files in parallel. */
+async function scanDirs(dirs: string[], count: number): Promise<ScreenshotEntry[]> {
+  const results = await Promise.all(dirs.map((dir) => scanFolder(dir, count)));
+
+  const seen = new Set<string>();
+  const merged: ScreenshotEntry[] = [];
+  for (const entries of results) {
+    for (const entry of entries) {
+      if (!seen.has(entry.path)) {
+        seen.add(entry.path);
+        merged.push(entry);
+      }
+    }
+  }
+
+  merged.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  return merged.slice(0, count);
 }
 
 async function findViaSpotlight(count: number): Promise<ScreenshotEntry[]> {
@@ -43,19 +88,14 @@ async function findViaSpotlight(count: number): Promise<ScreenshotEntry[]> {
   const paths = stdout.trim().split('\n').filter(Boolean);
   if (paths.length === 0) return [];
 
-  // mdfind returns files in arbitrary order, so we must stat all of them to find the newest
   const entries: ScreenshotEntry[] = [];
-
   const promises = paths.map(async (p) => {
     try {
-      const info = await stat(p);
-      if (info.isFile()) {
-        const name = p.split('/').pop() ?? p;
-        return { path: p, name, mtime: info.mtime } as ScreenshotEntry;
+      const info = await lstat(p);
+      if (info.isFile() && !info.isSymbolicLink()) {
+        return { path: p, name: p.split('/').pop() ?? p, mtime: info.mtime } as ScreenshotEntry;
       }
-    } catch {
-      // skip inaccessible files
-    }
+    } catch { /* skip */ }
     return null;
   });
 
@@ -68,31 +108,24 @@ async function findViaSpotlight(count: number): Promise<ScreenshotEntry[]> {
   return entries.slice(0, count);
 }
 
-async function findViaFolder(folder: string, count: number): Promise<ScreenshotEntry[]> {
-  const IMAGE_EXTENSIONS = new Set([
-    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.tiff', '.heic',
-  ]);
-
-  let dirEntries: string[];
+async function scanFolder(folder: string, count: number): Promise<ScreenshotEntry[]> {
+  let names: string[];
   try {
-    dirEntries = await readdir(folder);
+    names = await readdir(folder);
   } catch {
     return [];
   }
 
   const entries: ScreenshotEntry[] = [];
-  for (const name of dirEntries) {
-    const ext = extname(name).toLowerCase();
-    if (!IMAGE_EXTENSIONS.has(ext)) continue;
+  for (const name of names) {
+    if (!IMAGE_EXTENSIONS.has(extname(name).toLowerCase())) continue;
     const filePath = join(folder, name);
     try {
-      const info = await stat(filePath);
-      if (info.isFile()) {
+      const info = await lstat(filePath);
+      if (info.isFile() && !info.isSymbolicLink()) {
         entries.push({ path: filePath, name, mtime: info.mtime });
       }
-    } catch {
-      // skip
-    }
+    } catch { /* skip */ }
   }
 
   entries.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
