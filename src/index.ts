@@ -125,21 +125,25 @@ server.registerTool(
   {
     title: 'Paste Clipboard Image',
     description:
-      'Reads an image from the system clipboard and returns it. Bypasses terminal clipboard bugs.',
+      'Reads an image from the macOS clipboard. Use when the user says "look at my screenshot", "check the clipboard", or shares a visual. Falls back to the most recent screenshot file if clipboard is empty. The image is saved to session history for later access via paste_recent.',
+    annotations: {
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
-      format: z.enum(['png', 'jpeg']).optional().describe('Output format'),
+      format: z.enum(['png', 'jpeg']).optional().describe('Output format (default: png)'),
       quality: z
         .number()
         .min(1)
         .max(100)
         .optional()
-        .describe('JPEG quality (1-100, ignored for PNG)'),
+        .describe('JPEG quality 1-100 (ignored for PNG)'),
       max_dimension: z
         .number()
         .min(1)
         .optional()
-        .describe('Max long edge in pixels'),
-      save: z.boolean().optional().describe('Save copy to temp dir'),
+        .describe('Max long edge in pixels (default: 1568)'),
+      save: z.boolean().optional().describe('Save to session history (default: true)'),
     },
   },
   async (args): Promise<CallToolResult> => {
@@ -197,26 +201,30 @@ server.registerTool(
   },
 );
 
-// Tool 2: paste_recent — Show recent images from session or Spotlight
+// Tool 2: paste_recent — Show recent images from session + Spotlight
 server.registerTool(
   'paste_recent',
   {
     title: 'Paste Recent Screenshots',
     description:
-      'Shows the last N images. First checks session history (images previously read via paste_image), then falls back to macOS Spotlight to find screenshots from any app. Pass folder to scan a specific directory instead. Tip: if this returns empty, call paste_image first to capture the current clipboard screenshot into session history.',
+      'Shows the last N images by combining session history (paste_image saves) and macOS Spotlight screenshots (from any app: native, Shottr, CleanShot X). Results are sorted by time, newest first. Use when the user says "show my last screenshots" or "look at what I just captured". Pass folder to scan a specific directory instead.',
+    annotations: {
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       count: z
         .number()
         .min(1)
         .max(10)
         .optional()
-        .describe('Number of images (1-10)'),
-      folder: z.string().optional().describe('Source folder path (bypasses session and Spotlight)'),
+        .describe('Number of images to return (default: 3)'),
+      folder: z.string().optional().describe('Scan a specific folder instead of session + Spotlight'),
       max_dimension: z
         .number()
         .min(1)
         .optional()
-        .describe('Max long edge in pixels'),
+        .describe('Max long edge in pixels (default: 1568)'),
     },
   },
   async (args): Promise<CallToolResult> => {
@@ -233,27 +241,40 @@ server.registerTool(
           isError: true,
         };
       }
-      return await buildRecentResponse(found, `${folder}`, maxDimension);
+      return await buildRecentResponse(found, folder, maxDimension);
     }
 
-    // 1. Session history (images saved by paste_image)
+    // Merge session history + Spotlight, dedup by path, sort by mtime desc
     const sessionFiles = await storage.listImages();
-    if (sessionFiles.length > 0) {
-      const selected = sessionFiles.slice(0, count);
-      const entries = selected.map((f) => ({ path: f.path, name: f.name, mtime: f.mtime }));
-      return await buildRecentResponse(entries, 'session history', maxDimension);
+    const spotlightResults = await findRecentScreenshots(count * 2, config.screenshotsDir);
+
+    const seen = new Set<string>();
+    const merged: { path: string; name: string; mtime: Date }[] = [];
+
+    for (const f of sessionFiles) {
+      if (!seen.has(f.path)) {
+        seen.add(f.path);
+        merged.push({ path: f.path, name: f.name, mtime: f.mtime });
+      }
+    }
+    for (const f of spotlightResults) {
+      if (!seen.has(f.path)) {
+        seen.add(f.path);
+        merged.push(f);
+      }
     }
 
-    // 2. Spotlight fallback (screenshots from any app)
-    const spotlightResults = await findRecentScreenshots(count, config.screenshotsDir);
-    if (spotlightResults.length > 0) {
-      return await buildRecentResponse(spotlightResults, 'system (Spotlight)', maxDimension);
+    merged.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+    const selected = merged.slice(0, count);
+
+    if (selected.length === 0) {
+      return {
+        content: [{ type: 'text', text: 'No recent images found. Take a screenshot first (Cmd+Shift+4, Shottr, CleanShot X) or call paste_image to capture the clipboard.' }],
+        isError: true,
+      };
     }
 
-    return {
-      content: [{ type: 'text', text: 'No recent images. Use paste_image first, or take a screenshot (Cmd+Shift+4, Shottr, CleanShot X, etc).' }],
-      isError: true,
-    };
+    return await buildRecentResponse(selected, 'session + Spotlight', maxDimension);
   },
 );
 
@@ -306,14 +327,19 @@ server.registerTool(
   'paste_file',
   {
     title: 'Paste Image File',
-    description: 'Reads a specific image file by path and returns it.',
+    description:
+      'Reads a specific image file by absolute path and returns it. Use when you already know the file path (e.g., from logs, file listings, or user input). Supports PNG, JPEG, GIF, WebP, TIFF, HEIC.',
+    annotations: {
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
-      path: z.string().describe('Absolute or ~ path to image file'),
+      path: z.string().describe('Absolute path or ~/relative path to the image file'),
       max_dimension: z
         .number()
         .min(1)
         .optional()
-        .describe('Max long edge in pixels'),
+        .describe('Max long edge in pixels (default: 1568)'),
     },
   },
   async (args): Promise<CallToolResult> => {
@@ -405,18 +431,24 @@ server.registerTool(
 server.registerTool(
   'cleanup_images',
   {
-    title: 'Cleanup Images',
+    title: 'Cleanup Session Images',
     description:
-      'Deletes temporary ClipSnap images. Use all=true to delete all sessions.',
+      'Deletes temporary ClipSnap images from the session temp directory. Automatic cleanup already runs on TTL/size limits, so this is rarely needed. Use all=true to purge all sessions.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       all: z
         .boolean()
         .optional()
-        .describe('Delete ALL sessions (not just current)'),
+        .describe('Delete ALL sessions, not just current (default: false)'),
       older_than_minutes: z
         .number()
         .optional()
-        .describe('Delete files older than N minutes'),
+        .describe('Only delete files older than N minutes'),
     },
   },
   async (args): Promise<CallToolResult> => {
