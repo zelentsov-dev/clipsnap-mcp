@@ -198,13 +198,13 @@ server.registerTool(
   },
 );
 
-// Tool 2: paste_recent — Read last N images from a folder
+// Tool 2: paste_recent — Show recent images from session or Spotlight
 server.registerTool(
   'paste_recent',
   {
     title: 'Paste Recent Screenshots',
     description:
-      'Reads the last N screenshots. Uses macOS Spotlight to find screenshots from any app (native, Shottr, CleanShot X, etc). Pass folder to scan a specific directory instead.',
+      'Shows the last N images. First checks session history (images previously read via paste_image), then falls back to macOS Spotlight to find screenshots from any app. Pass folder to scan a specific directory instead.',
     inputSchema: {
       count: z
         .number()
@@ -212,7 +212,7 @@ server.registerTool(
         .max(10)
         .optional()
         .describe('Number of images (1-10)'),
-      folder: z.string().optional().describe('Source folder path'),
+      folder: z.string().optional().describe('Source folder path (bypasses session and Spotlight)'),
       max_dimension: z
         .number()
         .min(1)
@@ -223,66 +223,84 @@ server.registerTool(
   async (args): Promise<CallToolResult> => {
     const count = args.count ?? 3;
     const maxDimension = args.max_dimension ?? config.maxDimension;
-    const explicitFolder = args.folder ? resolvePath(args.folder) : undefined;
 
-    // Use Spotlight discovery when no folder specified, folder scan otherwise
-    const selected = explicitFolder
-      ? await findRecentScreenshots(count, explicitFolder)
-      : await findRecentScreenshots(count, config.screenshotsDir);
-
-    if (selected.length === 0) {
-      const hint = explicitFolder
-        ? `No image files found in ${explicitFolder}.`
-        : 'No screenshots found. Take some screenshots first (Cmd+Shift+4, Shottr, CleanShot X, etc).';
-      return {
-        content: [{ type: 'text', text: hint }],
-        isError: true,
-      };
-    }
-
-    const source = explicitFolder ?? 'system (Spotlight)';
-    const content: CallToolResult['content'] = [
-      {
-        type: 'text',
-        text: `${selected.length} recent screenshots from ${source}:`,
-      },
-    ];
-
-    for (let i = 0; i < selected.length; i++) {
-      const entry = selected[i];
-      try {
-        const raw = await readFile(entry.path);
-        const format = extname(entry.name).toLowerCase() === '.jpg' ||
-          extname(entry.name).toLowerCase() === '.jpeg'
-          ? 'jpeg' as const
-          : 'png' as const;
-
-        const processed = await processImage(raw, {
-          maxDimension,
-          format,
-          quality: config.jpegQuality,
-        });
-
-        content.push({
-          type: 'image',
-          data: processed.data.toString('base64'),
-          mimeType: processed.mimeType,
-        });
-        content.push({
-          type: 'text',
-          text: `${i + 1}. ${entry.name} (${processed.width}x${processed.height})`,
-        });
-      } catch (error) {
-        content.push({
-          type: 'text',
-          text: `${i + 1}. ${entry.name} — error: ${error instanceof Error ? error.message : String(error)}`,
-        });
+    // Explicit folder — scan it directly
+    if (args.folder) {
+      const folder = resolvePath(args.folder);
+      const found = await findRecentScreenshots(count, folder);
+      if (found.length === 0) {
+        return {
+          content: [{ type: 'text', text: `No image files found in ${folder}.` }],
+          isError: true,
+        };
       }
+      return await buildRecentResponse(found, `${folder}`, maxDimension);
     }
 
-    return { content };
+    // 1. Session history (images saved by paste_image)
+    const sessionFiles = await storage.listImages();
+    if (sessionFiles.length > 0) {
+      const selected = sessionFiles.slice(0, count);
+      const entries = selected.map((f) => ({ path: f.path, name: f.name, mtime: f.mtime }));
+      return await buildRecentResponse(entries, 'session history', maxDimension);
+    }
+
+    // 2. Spotlight fallback (screenshots from any app)
+    const spotlightResults = await findRecentScreenshots(count, config.screenshotsDir);
+    if (spotlightResults.length > 0) {
+      return await buildRecentResponse(spotlightResults, 'system (Spotlight)', maxDimension);
+    }
+
+    return {
+      content: [{ type: 'text', text: 'No recent images. Use paste_image first, or take a screenshot (Cmd+Shift+4, Shottr, CleanShot X, etc).' }],
+      isError: true,
+    };
   },
 );
+
+async function buildRecentResponse(
+  entries: { path: string; name: string; mtime: Date }[],
+  source: string,
+  maxDimension: number,
+): Promise<CallToolResult> {
+  const content: CallToolResult['content'] = [
+    { type: 'text', text: `${entries.length} recent images from ${source}:` },
+  ];
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    try {
+      const raw = await readFile(entry.path);
+      const format = extname(entry.name).toLowerCase() === '.jpg' ||
+        extname(entry.name).toLowerCase() === '.jpeg'
+        ? 'jpeg' as const
+        : 'png' as const;
+
+      const processed = await processImage(raw, {
+        maxDimension,
+        format,
+        quality: config.jpegQuality,
+      });
+
+      content.push({
+        type: 'image',
+        data: processed.data.toString('base64'),
+        mimeType: processed.mimeType,
+      });
+      content.push({
+        type: 'text',
+        text: `${i + 1}. ${entry.name} (${processed.width}x${processed.height}, ${timeAgo(entry.mtime)})`,
+      });
+    } catch (error) {
+      content.push({
+        type: 'text',
+        text: `${i + 1}. ${entry.name} — error: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  return { content };
+}
 
 // Tool 3: paste_file — Read a specific image file
 server.registerTool(
