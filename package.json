@@ -36,6 +36,14 @@
   ],
   "author": "Aleksei Zelentsov",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zelentsov-dev/clipsnap-mcp.git"
+  },
+  "homepage": "https://github.com/zelentsov-dev/clipsnap-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/zelentsov-dev/clipsnap-mcp/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0"
   },
